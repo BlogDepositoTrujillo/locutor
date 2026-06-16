@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Panel de Control - Mapa Activo</title>
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.6.1/firebase-database-compat.js"></script>
+    <style>
+        body { margin: 0; padding: 0; }
+        #mapa { height: 100vh; width: 100%; }
+        
+        /* Panel de estado dinámico */
+        #estado {
+            position: absolute; top: 10px; left: 50px; z-index: 1000;
+            background: white; padding: 15px; border-radius: 8px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.3); font-family: Arial, sans-serif;
+            font-size: 14px; transition: all 0.5s ease;
+            max-width: 280px;
+        }
+        
+        /* Alerta visual intermitente para cuando se apague o cierre la página */
+        .alerta-desconectado {
+            background-color: #ffcccc !important;
+            border: 2px solid #ff0000;
+            animation: parpadeo 1.5s infinite;
+        }
+
+        @keyframes parpadeo {
+            0% { opacity: 1; }
+            50% { opacity: 0.7; }
+            100% { opacity: 1; }
+        }
+    </style>
+</head>
+<body>
+
+    <div id="estado">
+        <div style="font-weight: bold; margin-bottom: 5px;">ESTADO DEL TRANSMISOR:</div>
+        <div id="texto-conexion">Conectando con el servidor...</div>
+        <div id="tiempo-atraso" style="font-size: 12px; margin-top: 5px; color: #666;"></div>
+    </div>
+    
+    <div id="mapa"></div>
+
+    <script>
+        // Tus datos reales de Firebase
+        const firebaseConfig = {
+            apiKey: "AIzaSyCVatFTkzDlB6Rj2xwAAtz8BK8Ab86g4N4",
+            authDomain: "rastreador-gps-ef686.firebaseapp.com",
+            databaseURL: "https://rastreador-gps-ef686-default-rtdb.firebaseio.com",
+            projectId: "rastreador-gps-ef686",
+            storageBucket: "rastreador-gps-ef686.firebasestorage.app",
+            messagingSenderId: "563380850657",
+            appId: "1:563380850657:web:59cef0fb7abff3e1794ca0"
+        };
+
+        firebase.initializeApp(firebaseConfig);
+        const database = firebase.database();
+
+        // Inicializa el mapa centrado de forma general
+        const mapa = L.map('mapa').setView([2.9273, -75.2818], 14);
+
+        L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+            attribution: '© OpenStreetMap'
+        }).addTo(mapa);
+
+        let pinDispositivo = null;
+        let ultimoTimestampRecibido = null;
+        let alertaSonoraActivada = false;
+
+        // Configuración del sonido de alerta (un pitido electrónico básico)
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        function sonarAlerta() {
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+            oscillator.type = 'sine';
+            oscillator.frequency.setValueAtTime(880, audioCtx.currentTime); // Tono agudo
+            gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime); // Volumen moderado
+            oscillator.start();
+            oscillator.stop(audioCtx.currentTime + 0.3); // Duración de 0.3 segundos
+        }
+
+        // 1. Escuchar los datos de Firebase en tiempo real
+        database.ref('rastreo/hija').on('value', (snapshot) => {
+            const coordenadas = snapshot.val();
+            
+            if (coordenadas && coordenadas.latitud && coordenadas.longitud) {
+                const pos = [coordenadas.latitud, coordenadas.longitud];
+                
+                // Guardamos el momento exacto en que llegó este dato
+                ultimoTimestampRecibido = Date.now();
+                alertaSonoraActivada = false; // Reinicia la alarma si vuelve a transmitir
+
+                // Quitar estilos de alerta si existían
+                document.getElementById("estado").classList.remove("alerta-desconectado");
+                document.getElementById("texto-conexion").innerHTML = `<span style="color: green; font-weight: bold;">● EN LÍNEA</span><br>Última señal: ${coordenadas.ultima_conexion}`;
+                document.getElementById("tiempo-atraso").innerText = "Transmitiendo con normalidad.";
+
+                if (pinDispositivo === null) {
+                    pinDispositivo = L.marker(pos).addTo(mapa).bindPopup('Ubicación de Hija').openPopup();
+                    mapa.setView(pos, 16);
+                } else {
+                    pinDispositivo.setLatLng(pos);
+                    mapa.panTo(pos);
+                }
+            }
+        });
+
+        // 2. RELOJ REVISOR (Control de pánico): Revisa cada 5 segundos si el emisor se apagó
+        setInterval(() => {
+            if (ultimoTimestampRecibido) {
+                const segundosTranscurridos = Math.floor((Date.now() - ultimoTimestampRecibido) / 1000);
+
+                // Si pasan más de 30 segundos sin datos nuevos, asumimos que cerró la página o perdió señal
+                if (segundosTranscurridos >= 30) {
+                    document.getElementById("estado").classList.add("alerta-desconectado");
+                    document.getElementById("texto-conexion").innerHTML = `<span style="color: red; font-weight: bold;">⚠️ DESCONECTADO</span><br>La página fue cerrada o no tiene internet.`;
+                    document.getElementById("tiempo-atraso").innerText = `Sin reporte desde hace: ${segundosTranscurridos} segundos.`;
+                    
+                    // Hace sonar un pitido para advertirte del cierre
+                    if (!alertaSonoraActivada || segundosTranscurridos % 10 === 0) { 
+                        sonarAlerta();
+                        alertaSonoraActivada = true;
+                    }
+                }
+            } else {
+                document.getElementById("texto-conexion").innerText = "Esperando la primera conexión del celular...";
+            }
+        }, 5000); // Revisa el estado de la conexión continuamente cada 5 segundos
+    </script>
+</body>
+</html>
